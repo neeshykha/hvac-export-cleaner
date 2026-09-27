@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HVAC Export Cleaner</title>
+<meta name="description" content="Turn a raw smart-thermostat telemetry export into something a person can read: setpoint events or a monthly timeline. Runs in your browser; nothing is uploaded.">
+<style>
+  :root{
+    --bg:#f7f8fa; --surface:#ffffff; --ink:#16202e; --ink-2:#4b5665; --ink-3:#7b8494;
+    --line:#e3e7ee; --accent:#1e5bd6; --accent-bg:#eef3fd; --accent-line:#a3c2f5;
+    --good:#0f7b48; --good-bg:#e7f5ee; --warn:#8a5a00; --warn-bg:#fdf4e1; --bad:#b3261e; --bad-bg:#fdecea;
+    --band:#f3f6f9; --radius:12px;
+    --s-off:#7b8494; --s-cool:#2e86c1; --s-heat:#d35400; --s-emer:#c0392b; --s-aux:#8e44ad;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f141b; --surface:#161d27; --ink:#e6ebf2; --ink-2:#b3bdca; --ink-3:#8491a2;
+      --line:#263140; --accent:#7ea8f5; --accent-bg:#1a2740; --accent-line:#34507f;
+      --good:#5fcf97; --good-bg:#15301f; --warn:#f0c065; --warn-bg:#3a2c10; --bad:#f28b82; --bad-bg:#3b1a18;
+      --band:#1b2330;
+      --s-off:#9aa3b2; --s-cool:#6fb3e6; --s-heat:#f0a04b; --s-emer:#ef7b6e; --s-aux:#c39be0;
+    }
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:0 16px 72px}
+  .wrap{max-width:960px;margin:0 auto}
+  header{padding:48px 0 8px}
+  .crumb{font-size:.85rem;color:var(--ink-3)}
+  .crumb a{color:var(--ink-3)}
+  h1{font-size:1.9rem;letter-spacing:-.02em;line-height:1.2;margin-top:6px}
+  .lede{font-size:1.08rem;color:var(--ink-2);margin-top:10px;max-width:64ch}
+  .private{display:inline-block;margin-top:12px;font-size:.85rem;font-weight:600;color:var(--good);background:var(--good-bg);border-radius:999px;padding:2px 12px}
+  a{color:var(--accent)}
+  .drop{margin-top:28px;border:2px dashed var(--accent-line);border-radius:var(--radius);background:var(--surface);padding:32px 20px;text-align:center;cursor:pointer;transition:background .15s}
+  .drop.over{background:var(--accent-bg)}
+  .drop strong{display:block;font-size:1.05rem}
+  .drop span{color:var(--ink-2);font-size:.92rem}
+  .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+  button{font:inherit;font-size:.92rem;font-weight:600;border-radius:8px;padding:8px 14px;cursor:pointer;border:1px solid var(--accent);background:var(--accent);color:#fff}
+  button.ghost{background:transparent;color:var(--accent)}
+  button:disabled{opacity:.5;cursor:default}
+  .files{font-size:.88rem;color:var(--ink-2)}
+  .err{margin-top:14px;padding:10px 14px;border-radius:8px;background:var(--bad-bg);color:var(--bad);font-size:.92rem}
+  .tabs{display:flex;gap:4px;margin-top:32px;border-bottom:1px solid var(--line)}
+  .tab{background:none;border:none;border-bottom:2px solid transparent;border-radius:0;color:var(--ink-2);padding:10px 14px;margin-bottom:-1px}
+  .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+  .panel{padding-top:18px}
+  .explain{color:var(--ink-2);font-size:.93rem;max-width:70ch}
+  .explain code{font-size:.85em;background:var(--band);padding:1px 5px;border-radius:4px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:16px}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+  .stat b{display:block;font-size:1.35rem;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+  .stat span{font-size:.8rem;color:var(--ink-3)}
+  .flags{margin-top:14px;display:flex;flex-direction:column;gap:6px}
+  .flag{font-size:.88rem;padding:8px 12px;border-radius:8px;background:var(--warn-bg);color:var(--warn)}
+  .months{display:flex;flex-wrap:wrap;gap:6px;margin-top:16px}
+  .chip{background:var(--surface);color:var(--ink-2);border:1px solid var(--line);font-weight:500}
+  .chip[aria-pressed="true"]{background:var(--accent-bg);color:var(--ink);border-color:var(--accent-line)}
+  .chip small{color:var(--ink-3);font-weight:400}
+  .tablewrap{margin-top:14px;overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface);max-height:460px;overflow-y:auto}
+  table{border-collapse:collapse;width:100%;font-size:.88rem;font-variant-numeric:tabular-nums}
+  th{position:sticky;top:0;background:var(--surface);text-align:left;font-weight:600;padding:8px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:6px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  tbody tr:nth-child(even){background:var(--band)}
+  td.num{text-align:right}
+  .st{font-weight:600}
+  .st-Off{color:var(--s-off)} .st-Cooling{color:var(--s-cool)} .st-Heating{color:var(--s-heat)}
+  .st-Emergency{color:var(--s-emer)} .st-Aux{color:var(--s-aux)}
+  .more{font-size:.84rem;color:var(--ink-3);margin-top:8px}
+  .empty{color:var(--ink-3);font-size:.93rem;padding:18px 0}
+  details{margin-top:40px;border-top:1px solid var(--line);padding-top:16px}
+  summary{cursor:pointer;font-weight:600}
+  details p,details li{font-size:.92rem;color:var(--ink-2);margin-top:8px;max-width:70ch}
+  details ul{padding-left:20px}
+  details table{margin-top:10px;width:auto}
+  footer{margin-top:40px;font-size:.85rem;color:var(--ink-3)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="crumb"><a href="https://neeshykha.github.io/portfolio/">Shipped tools</a> / hvac-export-cleaner</p>
+  <h1>HVAC Export Cleaner</h1>
+  <p class="lede">A smart-thermostat export is thousands of sparse telemetry pings, and almost none of them say anything a person asked about. Drop one here and get back either the moments someone changed the setpoint, or a clean month-by-month timeline of temperature, state, and target.</p>
+  <span class="private">Runs entirely in your browser. Nothing is uploaded.</span>
+</header>
+
+<div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose CSV exports">
+  <strong>Drop one or more CSV exports here</strong>
+  <span>or click to choose files. Multiple exports get merged for the timeline view.</span>
+  <input type="file" id="file" accept=".csv,text/csv" multiple hidden>
+</div>
+<div class="row">
+  <button class="ghost" id="sample">Try it with sample data</button>
+  <span class="files" id="files"></span>
+</div>
+<div id="error"></div>
+
+<div id="results" hidden>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" id="tab-set" aria-selected="true">Setpoint events</button>
+    <button class="tab" role="tab" id="tab-tl" aria-selected="false">Monthly timeline</button>
+  </div>
+
+  <section class="panel" id="panel-set" role="tabpanel">
+    <p class="explain">Only the rows where a target temperature was set. A row stays if <code>tt</code> has a value, or if the unit is in heat-cool mode (<code>tm</code> = 4) and holds a heat or cool setpoint instead. Values pass through exactly as exported.</p>
+    <div class="stats" id="set-stats"></div>
+    <div class="row"><button id="set-dl">Download setpoints CSV</button><span class="files" id="set-which"></span></div>
+    <div class="tablewrap"><table id="set-table"></table></div>
+    <p class="more" id="set-more"></p>
+  </section>
+
+  <section class="panel" id="panel-tl" role="tabpanel" hidden>
+    <p class="explain">Every ping, merged across files and sorted, with ambient temperature, current state, and target temperature carried forward so each row is a complete snapshot. Split by calendar month, not by file, because exports spill across month edges.</p>
+    <div class="stats" id="tl-stats"></div>
+    <div class="flags" id="tl-flags"></div>
+    <div class="months" id="tl-months"></div>
+    <div class="row"><button id="tl-dl">Download this month</button><button class="ghost" id="tl-dl-all">Download all months</button></div>
+    <div class="tablewrap"><table id="tl-table"></table></div>
+    <p class="more" id="tl-more"></p>
+  </section>
+</div>
+
+<details>
+  <summary>What the columns mean, and the rules this applies</summary>
+  <p>The export has twelve columns: <code>timestamp, cf, ch, cs, ct, ctt, fs, htt, internal_temp, tf, tm, tt</code>. Most rows fill in one or two of them. The ones that matter here:</p>
+  <ul>
+    <li><b>tt</b>: target temperature, the setpoint in single-mode operation.</li>
+    <li><b>htt / ctt</b>: heat and cool targets, used instead of <code>tt</code> in heat-cool mode.</li>
+    <li><b>tm</b>: target mode, what the unit is set to. 0 off, 1 cool, 2 heat, 3 emergency heat, 4 heat-cool.</li>
+    <li><b>cs</b>: current state, what the unit is actually doing. 0 off, 1 cooling, 2 heating, 3 emergency heat, 4 aux heat. Yes, 4 means something different here than in <code>tm</code>; that's the most common way these exports get misread.</li>
+    <li><b>ct</b>: ambient temperature at the thermostat.</li>
+  </ul>
+  <p>Quirks it handles: CRLF line endings (a stray <code>\r</code> makes the last column look filled on every row), <code>tm</code> written as <code>4.0</code>, setpoint rows with a blank mode (kept, mode left blank), duplicate rows where two monthly exports overlap, and columns in any order. Readings of exactly 32.0°F are usually a sensor dropout; they're counted and flagged but left in, because silently editing telemetry is worse than showing a glitch.</p>
+</details>
+
+<footer>
+  <p>Sample data is synthetic: a toy thermal model generated by <code>tools/make_sample.js</code>, not a real device. <a href="https://github.com/neeshykha/hvac-export-cleaner">Code on GitHub</a></p>
+</footer>
+
+</div>
+
+<script src="cleaner.js"></script>
+<script>
+(function(){
+  'use strict';
+  var PREVIEW = 300;
+  var $ = function(id){ return document.getElementById(id); };
+  var state = { names: [], exports: [], set: null, tl: null, month: 0 };
+
+  function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function fmt(n){ return Number(n).toLocaleString(); }
+  function stat(v, label){ return '<div class="stat"><b>' + esc(v) + '</b><span>' + esc(label) + '</span></div>'; }
+
+  function download(name, text){
+    var blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+  }
+
+  function showError(msg){ $('error').innerHTML = msg ? '<div class="err">' + esc(msg) + '</div>' : ''; }
+
+  function load(files){
+    showError('');
+    Promise.all(files.map(function(f){ return f.text().then(function(t){ return { name: f.name, text: t }; }); }))
+      .then(ingest)
+      .catch(function(e){ showError(e.message); });
+  }
+
+  function ingest(list){
+    try {
+      state.names = list.map(function(x){ return x.name; });
+      state.exports = list.map(function(x){
+        try { return H().readExport(x.text).rows; }
+        catch (e) { throw new Error(x.name + ': ' + e.message); }
+      });
+    } catch (e) { showError(e.message); return; }
+    state.set = H().setpointEvents(state.exports[0]);
+    state.tl = H().snapshots(state.exports);
+    state.month = 0;
+    $('files').textContent = state.names.length === 1 ? state.names[0] : state.names.length + ' files: ' + state.names.join(', ');
+    $('results').hidden = false;
+    renderSet(); renderTimeline();
+  }
+
+  function H(){ return window.HVAC; }
+
+  function renderSet(){
+    var s = state.set;
+    var modes = Object.keys(s.modes).sort(function(a,b){ return s.modes[b] - s.modes[a]; })
+      .map(function(k){ return k + ' ' + s.modes[k]; }).join(', ');
+    $('set-stats').innerHTML = stat(fmt(s.kept + s.dropped), 'rows in the export') + stat(fmt(s.kept), 'setpoint events kept') +
+      stat(fmt(s.dropped), 'telemetry pings dropped') + stat(s.kept ? ((s.kept / (s.kept + s.dropped)) * 100).toFixed(1) + '%' : '0%', 'of rows were signal');
+    $('set-which').textContent = (state.names.length > 1 ? 'From ' + state.names[0] + '. ' : '') + (modes ? 'Modes: ' + modes + '.' : '');
+    var head = '<thead><tr><th>timestamp</th><th>mode</th><th>tt</th><th>htt</th><th>ctt</th></tr></thead>';
+    var body = s.rows.slice(0, PREVIEW).map(function(r){
+      return '<tr><td>' + esc(r.timestamp) + '</td><td>' + esc(r.mode) + '</td><td class="num">' + esc(r.tt) + '</td><td class="num">' + esc(r.htt) + '</td><td class="num">' + esc(r.ctt) + '</td></tr>';
+    }).join('');
+    $('set-table').innerHTML = s.kept ? head + '<tbody>' + body + '</tbody>' : '<tbody><tr><td class="empty">No setpoint events in this file.</td></tr></tbody>';
+    $('set-more').textContent = s.kept > PREVIEW ? 'Showing the first ' + PREVIEW + ' of ' + fmt(s.kept) + '. The download has all of them.' : '';
+    $('set-dl').disabled = !s.kept;
+  }
+
+  function renderTimeline(){
+    var t = state.tl;
+    $('tl-stats').innerHTML = stat(fmt(t.input), 'rows across ' + state.names.length + (state.names.length === 1 ? ' file' : ' files')) +
+      stat(fmt(t.total), 'complete snapshots') + stat(fmt(t.duplicates), 'overlap duplicates removed') + stat(t.months.length, t.months.length === 1 ? 'month' : 'months');
+    var flags = [];
+    t.months.forEach(function(m){ if (m.partial) flags.push(m.label + ' has only ' + m.days + ' day' + (m.days === 1 ? '' : 's') + ' of data: the tail of an export that crossed a month edge. Keep it, or ignore that tab.'); });
+    if (t.sensorDropouts) flags.push(t.sensorDropouts + ' ambient reading' + (t.sensorDropouts === 1 ? ' is' : 's are') + ' exactly 32.0°F, which usually means a sensor dropout. Left in as exported.');
+    if (t.heatCoolRows) flags.push(t.heatCoolRows + ' row' + (t.heatCoolRows === 1 ? ' is' : 's are') + ' in heat-cool mode. This view carries the single target (tt) only; the Setpoint events tab shows the heat and cool targets.');
+    if (t.leadingDropped) flags.push('The first ' + fmt(t.leadingDropped) + ' rows were skipped until temperature, state, and target had all reported once.');
+    if (t.unparsed) flags.push(fmt(t.unparsed) + ' rows had a timestamp this tool couldn’t read and were skipped.');
+    $('tl-flags').innerHTML = flags.map(function(f){ return '<div class="flag">' + esc(f) + '</div>'; }).join('');
+    $('tl-months').innerHTML = t.months.map(function(m, i){
+      return '<button class="chip" data-i="' + i + '" aria-pressed="' + (i === state.month) + '">' + esc(m.label) + ' <small>' + fmt(m.rows.length) + '</small></button>';
+    }).join('');
+    renderMonth();
+  }
+
+  function renderMonth(){
+    var m = state.tl.months[state.month];
+    Array.prototype.forEach.call(document.querySelectorAll('.chip'), function(c){ c.setAttribute('aria-pressed', String(+c.dataset.i === state.month)); });
+    $('tl-dl').disabled = $('tl-dl-all').disabled = !m;
+    if (!m) { $('tl-table').innerHTML = '<tbody><tr><td class="empty">Not enough data for a snapshot: the file never reports all of temperature, state, and target.</td></tr></tbody>'; $('tl-more').textContent = ''; return; }
+    var head = '<thead><tr><th>Timestamp</th><th>Ambient (°F)</th><th>Current state</th><th>Target (°F)</th></tr></thead>';
+    var body = m.rows.slice(0, PREVIEW).map(function(r){
+      return '<tr><td>' + esc(r.timestamp) + '</td><td class="num">' + esc(r.ambient) + '</td><td class="st st-' + esc(r.state.split(' ')[0]) + '">' + esc(r.state) + '</td><td class="num">' + esc(r.target) + '</td></tr>';
+    }).join('');
+    $('tl-table').innerHTML = head + '<tbody>' + body + '</tbody>';
+    $('tl-more').textContent = m.rows.length > PREVIEW ? 'Showing the first ' + PREVIEW + ' of ' + fmt(m.rows.length) + ' rows for ' + m.label + '. The download has all of them.' : '';
+  }
+
+  function baseName(){ return (state.names[0] || 'export').replace(/\.csv$/i, ''); }
+
+  // Wiring
+  var drop = $('drop'), input = $('file');
+  drop.addEventListener('click', function(){ input.click(); });
+  drop.addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
+  input.addEventListener('change', function(){ if (input.files.length) load(Array.prototype.slice.call(input.files)); input.value = ''; });
+  ['dragenter','dragover'].forEach(function(ev){ drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.add('over'); }); });
+  ['dragleave','drop'].forEach(function(ev){ drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.remove('over'); }); });
+  drop.addEventListener('drop', function(e){
+    var files = Array.prototype.filter.call(e.dataTransfer.files, function(f){ return /\.csv$/i.test(f.name) || f.type === 'text/csv'; });
+    if (files.length) load(files); else showError('Those don’t look like CSV files.');
+  });
+
+  $('sample').addEventListener('click', function(){
+    showError('');
+    var names = ['thermostat_export_july.csv', 'thermostat_export_august.csv'];
+    Promise.all(names.map(function(n){
+      return fetch('sample/' + n).then(function(r){ if (!r.ok) throw new Error('Couldn’t load the sample (' + r.status + ').'); return r.text(); })
+        .then(function(t){ return { name: n, text: t }; });
+    })).then(ingest).catch(function(e){ showError(e.message + ' If you opened this page from disk, serve it over http instead.'); });
+  });
+
+  function select(tab){
+    var set = tab === 'set';
+    $('tab-set').setAttribute('aria-selected', String(set)); $('tab-tl').setAttribute('aria-selected', String(!set));
+    $('panel-set').hidden = !set; $('panel-tl').hidden = set;
+  }
+  $('tab-set').addEventListener('click', function(){ select('set'); });
+  $('tab-tl').addEventListener('click', function(){ select('tl'); });
+  $('tl-months').addEventListener('click', function(e){
+    var b = e.target.closest('.chip'); if (!b) return;
+    state.month = +b.dataset.i; renderMonth();
+  });
+
+  $('set-dl').addEventListener('click', function(){ download(baseName() + '_setpoints.csv', H().setpointCSV(state.set)); });
+  $('tl-dl').addEventListener('click', function(){
+    var m = state.tl.months[state.month];
+    download('timeline_' + m.key + '.csv', H().snapshotCSV(m));
+  });
+  $('tl-dl-all').addEventListener('click', function(){
+    // One file, with a Month column, so it drops into a spreadsheet and pivots cleanly.
+    var rows = [];
+    state.tl.months.forEach(function(m){ m.rows.forEach(function(r){ rows.push([m.label, r.timestamp, r.ambient, r.state, r.target]); }); });
+    var lines = ['Month,Timestamp,Ambient Temperature (°F),Current State,Target Temp (°F)'].concat(rows.map(function(r){ return r.join(','); }));
+    download('timeline_all_months.csv', lines.join('\r\n') + '\r\n');
+  });
+})();
+</script>
+</body>
+</html>
