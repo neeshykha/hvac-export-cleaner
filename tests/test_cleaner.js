@@ -31,7 +31,7 @@ test('keeps heat-cool row with only htt/ctt', () => {
   const r = H.readExport(exp(['07/01/2026 07:00:00,,,,,76.0,,68.0,,,4,'])).rows;
   const res = H.setpointEvents(r);
   assert.strictEqual(res.kept, 1);
-  assert.deepStrictEqual(res.rows[0], { timestamp: '07/01/2026 07:00:00', mode: 'heat-cool', tt: '', htt: '68.0', ctt: '76.0' });
+  assert.deepStrictEqual(res.rows[0], { timestamp: '07/01/2026 07:00:00', mode: 'heat-cool', modeSource: 'row', tt: '', htt: '68.0', ctt: '76.0' });
 });
 test('drops htt/ctt row when tm is not 4', () => {
   const r = H.readExport(exp(['07/01/2026 07:00:00,,,,,76.0,,68.0,,,1,'])).rows;
@@ -41,11 +41,31 @@ test('tm "4.0" is treated as heat-cool', () => {
   const r = H.readExport(exp(['07/01/2026 07:00:00,,,,,76.0,,,,,4.0,'])).rows;
   assert.strictEqual(H.setpointEvents(r).rows[0].mode, 'heat-cool');
 });
-test('blank tm with tt set is kept with a blank mode', () => {
+test('blank tm with tt set and no mode anywhere is kept with a blank mode', () => {
   const r = H.readExport(exp(['07/01/2026 07:00:00,,,,,,,,,,,72.0'])).rows;
   const res = H.setpointEvents(r);
   assert.strictEqual(res.kept, 1);
   assert.strictEqual(res.rows[0].mode, '');
+  assert.strictEqual(res.rows[0].modeSource, 'unknown');
+});
+test('blank tm carries the last reported mode forward', () => {
+  const r = H.readExport(exp(['07/01/2026 06:00:00,,,,,,,,,,2,', '07/01/2026 07:00:00,,,,,,,,,,,72.0'])).rows;
+  const row = H.setpointEvents(r).rows[0];
+  assert.deepStrictEqual([row.mode, row.modeSource], ['heat', 'carried']);
+});
+test('a mode ping within 10s after the change beats the carried mode', () => {
+  const r = H.readExport(exp(['07/01/2026 06:00:00,,,,,,,,,,2,', '07/01/2026 07:00:00,,,,,,,,,,,72.0', '07/01/2026 07:00:04,,,,,,,,,,1,'])).rows;
+  const row = H.setpointEvents(r).rows[0];
+  assert.deepStrictEqual([row.mode, row.modeSource], ['cool', 'nearby']);
+});
+test('a mode ping more than 10s later is not used', () => {
+  const r = H.readExport(exp(['07/01/2026 06:00:00,,,,,,,,,,2,', '07/01/2026 07:00:00,,,,,,,,,,,72.0', '07/01/2026 07:00:30,,,,,,,,,,1,'])).rows;
+  assert.strictEqual(H.setpointEvents(r).rows[0].mode, 'heat');
+});
+test('a row\'s own tm always wins', () => {
+  const r = H.readExport(exp(['07/01/2026 06:00:00,,,,,,,,,,2,', '07/01/2026 07:00:00,,,,,,,,,,1,72.0', '07/01/2026 07:00:02,,,,,,,,,,0,'])).rows;
+  const row = H.setpointEvents(r).rows[0];
+  assert.deepStrictEqual([row.mode, row.modeSource], ['cool', 'row']);
 });
 test('CRLF: trailing \\r never makes an empty tt look filled', () => {
   const r = H.readExport(exp(['07/01/2026 07:00:00,,,,75.0,,,,,,,'], '\r\n')).rows;
@@ -125,7 +145,22 @@ test('sample: setpoint events are a small minority of rows', () => {
   const res = H.setpointEvents(jul);
   assert.ok(res.kept > 20 && res.kept < jul.length * 0.1, `kept ${res.kept} of ${jul.length}`);
   assert.ok(res.modes['heat-cool'] > 0, 'expected heat-cool rows in the sample');
-  assert.ok(res.modes['(blank)'] > 0, 'expected blank-mode rows in the sample');
+  assert.ok(res.modeSources.carried > 0, 'expected blank-mode rows resolved by carrying forward');
+});
+test('sample: overlapping monthly exports in the same zone are not flagged as offset', () => {
+  assert.deepStrictEqual(H.snapshots([jul, aug]).offsets, []);
+});
+test('sample: the same export shifted six hours is flagged, with the right direction', () => {
+  const shifted = jul.map(r => {
+    const t = H.parseTimestamp(r.timestamp);
+    const d = new Date(Date.UTC(t.y, t.mo - 1, t.d, t.h + 6, t.mi, t.s));
+    const p = n => String(n).padStart(2, '0');
+    return Object.assign({}, r, { timestamp: `${p(d.getUTCMonth() + 1)}/${p(d.getUTCDate())}/${d.getUTCFullYear()} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}` });
+  });
+  const o = H.snapshots([jul, shifted]).offsets;
+  assert.strictEqual(o.length, 1);
+  assert.strictEqual(o[0].hours, 6, 'second file should read 6 hours ahead');
+  assert.ok(o[0].matched > 0.9 * o[0].of);
 });
 test('sample: every kept row satisfies the filter rule', () => {
   H.setpointEvents(aug).rows.forEach(r => {

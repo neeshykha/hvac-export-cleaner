@@ -23,6 +23,8 @@ That second clause is the one people miss. In heat-cool mode the unit tracks two
 
 **Monthly timeline.** Every ping from one or more exports, merged, sorted, and forward-filled so each row is a complete snapshot of ambient temperature, current state, and target. It's split by **calendar month, not by file**, because a "July" export usually starts on the evening of June 30.
 
+The first version shipped tested only against synthetic data, and it passed everything. Running it locally on four real exports the same day turned up two problems the fake data couldn't: the mode column was mostly blank, and two exports of the same device were six hours apart with nothing in the files to say so. Both fixes below came from that run. Synthetic data only tests the quirks you already knew to plant.
+
 ## The rules that aren't obvious
 
 | Quirk | What goes wrong without handling it | What this does |
@@ -30,8 +32,9 @@ That second clause is the one people miss. In heat-cool mode the unit tracks two
 | `tm` and `cs` both use code 4 | `tm` 4 is heat-cool (a setting); `cs` 4 is aux heat (an action). Mixing them up mislabels every aux-heat cycle. | Separate mappings, tested against each other. |
 | CRLF line endings | The trailing `\r` makes the last column (`tt`) non-empty on every row, so every row looks like a setpoint. | Strips `\r` before any emptiness test. |
 | `tm` written as `4.0` | String comparison against `"4"` misses it. | Normalizes to a number first. |
-| Setpoint rows with a blank `tm` | Dropping them loses real events. | Keeps them, leaves the mode blank. |
+| Most setpoint rows have no `tm` | `tm` is its own sparse ping, so in real exports most setpoint changes don't carry a mode on the same row; in one test export, 108 of 125. Leave it blank and the "mode" column is mostly empty. | Uses the row's own mode, else a mode ping in the 10 seconds after (a mode change arriving on its own row, which does happen), else the last mode reported. Inferred modes are shown in italics with a count. |
 | Monthly exports overlap at the edge | Merged files double-count the overlap. | Drops exact duplicate rows; distinct pings that share a timestamp are kept. |
+| Two exports of one device in different time zones | The file doesn't say what zone it's in. Two exports of the same days, six hours apart, share zero rows, so merging them records every event twice and nothing looks wrong. | Tries whole- and half-hour shifts between every overlapping pair and flags one when the same readings line up under a shift. It matches whole rows, not bare timestamps, because regular ping schedules line timestamps up at any shift. It warns rather than corrects, since it can't know which file is right. |
 | Ambient reads exactly 32.0°F | Looks like a freezing house; it's a sensor dropout. | Counts and flags it, and leaves it in. Quietly editing telemetry is worse than showing a glitch. |
 | Partial months | A single evening from an older export becomes its own tab. | Flags any month with two days of data or fewer. |
 
@@ -56,7 +59,7 @@ cleaner.js              all of the logic, no DOM; shared by the page, the CLI, a
 tools/clean.js          same logic from the command line
 tools/make_sample.js    generates the synthetic sample exports (deterministic)
 sample/                 two synthetic monthly exports that overlap at the month edge
-tests/test_cleaner.js   22 tests: every quirk above, plus the samples end to end
+tests/test_cleaner.js   28 tests: every quirk above, plus the samples end to end
 ```
 
 ```bash

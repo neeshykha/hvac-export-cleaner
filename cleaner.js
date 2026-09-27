@@ -81,16 +81,51 @@
     return code(r.tm) === 4 && (clean(r.htt) !== '' || clean(r.ctt) !== '');
   }
 
+  // A mode change that lands with a setpoint usually arrives as its own ping within a few seconds.
+  var MODE_LOOKAHEAD_S = 10;
+
+  function seconds(ts) {
+    var t = parseTimestamp(ts);
+    return t ? Date.UTC(t.y, t.mo - 1, t.d, t.h, t.mi, t.s) / 1000 : null;
+  }
+
+  // tm is a sparse ping like everything else, so most setpoint rows don't carry it. Resolve the
+  // mode from the row itself, else a tm ping just after (the change arriving on its own row),
+  // else the last tm reported before it. modeSource records which one was used.
   function setpointEvents(rows) {
-    var kept = [], modes = {};
-    rows.forEach(function (r) {
-      if (!isSetpointEvent(r)) return;
-      var mode = modeLabel(r.tm);
+    var kept = [], modes = {}, sources = { row: 0, nearby: 0, carried: 0, unknown: 0 };
+    var order = rows.map(function (r, i) { return { r: r, i: i, s: seconds(r.timestamp) }; });
+    order.sort(function (a, b) {
+      if (a.s === null || b.s === null) return a.i - b.i;
+      return a.s - b.s || a.i - b.i;
+    });
+    var last = '';
+    order.forEach(function (x, pos) {
+      var r = x.r, own = modeLabel(r.tm);
+      if (isSetpointEvent(r)) {
+        var mode = own, source = 'row';
+        if (!mode && x.s !== null) {
+          for (var k = pos + 1; k < order.length && order[k].s !== null && order[k].s - x.s <= MODE_LOOKAHEAD_S; k++) {
+            var m = modeLabel(order[k].r.tm);
+            if (m) { mode = m; source = 'nearby'; break; }
+          }
+        }
+        if (!mode && last) { mode = last; source = 'carried'; }
+        record(mode, source, r, x.i);
+      }
+      if (own) last = own;
+    });
+    function record(mode, source, r, i) {
+      if (!mode) source = 'unknown';
+      sources[source]++;
       modes[mode || '(blank)'] = (modes[mode || '(blank)'] || 0) + 1;
       // Values pass through untouched, so "70.0" stays "70.0".
-      kept.push({ timestamp: clean(r.timestamp), mode: mode, tt: clean(r.tt), htt: clean(r.htt), ctt: clean(r.ctt) });
-    });
-    return { rows: kept, kept: kept.length, dropped: rows.length - kept.length, modes: modes };
+      kept.push({ timestamp: clean(r.timestamp), mode: mode, modeSource: source, tt: clean(r.tt), htt: clean(r.htt), ctt: clean(r.ctt), _i: i });
+    }
+    // Output keeps the export's own row order.
+    kept.sort(function (a, b) { return a._i - b._i; });
+    kept.forEach(function (k) { delete k._i; });
+    return { rows: kept, kept: kept.length, dropped: rows.length - kept.length, modes: modes, modeSources: sources };
   }
 
   // MM/DD/YYYY HH:MM:SS. Also accepts ISO-style YYYY-MM-DD HH:MM:SS.
@@ -106,6 +141,46 @@
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
   function sortKey(t) { return t.y + '-' + pad(t.mo) + '-' + pad(t.d) + ' ' + pad(t.h) + ':' + pad(t.mi) + ':' + pad(t.s); }
   function oneDecimal(v) { var n = Number(v); return isFinite(n) ? n.toFixed(1) : ''; }
+
+  // Exports carry no time zone. Two exports of the same device taken in different zones overlap in
+  // time but share almost no timestamps, until one is shifted by a whole (or half) number of hours.
+  // Merging those would record every event twice. Returns one finding per suspect pair.
+  function detectOffsets(exportsRows) {
+    // Match whole rows (time plus every value), not bare timestamps: regular ping schedules line
+    // timestamps up at any shift, but the same readings only line up at the real offset.
+    var body = function (r) { return COLUMNS.slice(1).map(function (k) { return clean(r[k]); }).join('|'); };
+    var sets = exportsRows.map(function (rows) {
+      var s = {}, list = [];
+      rows.forEach(function (r) {
+        var t = seconds(r.timestamp);
+        if (t === null) return;
+        var k = t + '|' + body(r);
+        if (!s[k]) { s[k] = true; list.push({ t: t, b: body(r) }); }
+      });
+      list.sort(function (a, b) { return a.t - b.t; });
+      return { set: s, list: list };
+    });
+    var found = [];
+    for (var a = 0; a < sets.length; a++) {
+      for (var b = a + 1; b < sets.length; b++) {
+        var A = sets[a], B = sets[b];
+        if (A.list.length < 20 || B.list.length < 20) continue;
+        var best = { shift: 0, hits: 0, of: 0 }, base = null;
+        for (var h = -14; h <= 14; h += 0.5) {
+          var off = h * 3600, hits = 0, of = 0;
+          var lo = A.list[0].t, hi = A.list[A.list.length - 1].t;
+          B.list.forEach(function (x) { var u = x.t + off; if (u >= lo && u <= hi) { of++; if (A.set[u + '|' + x.b]) hits++; } });
+          if (h === 0) base = { hits: hits, of: of };
+          if (of >= 20 && hits > best.hits) best = { shift: h, hits: hits, of: of };
+        }
+        // Flag only when a shift explains most of the overlap and unshifted barely matches.
+        if (best.shift !== 0 && best.hits >= 0.5 * best.of && (!base || base.hits < 0.2 * Math.max(base.of, 1) || base.hits * 3 < best.hits)) {
+          found.push({ a: a, b: b, hours: -best.shift, matched: best.hits, of: best.of });
+        }
+      }
+    }
+    return found;
+  }
 
   // Merge any number of exports into forward-filled snapshots, grouped by calendar month.
   function snapshots(exportsRows) {
@@ -150,7 +225,8 @@
     return {
       months: months, total: out.length, input: all.length + dupes + unparsed,
       duplicates: dupes, unparsed: unparsed, leadingDropped: lead,
-      sensorDropouts: dropouts, heatCoolRows: heatCool
+      sensorDropouts: dropouts, heatCoolRows: heatCool,
+      offsets: exportsRows.length > 1 ? detectOffsets(exportsRows) : []
     };
   }
 
@@ -177,7 +253,7 @@
     COLUMNS: COLUMNS, TM_LABELS: TM_LABELS, CS_LABELS: CS_LABELS,
     parseCSV: parseCSV, readExport: readExport, modeLabel: modeLabel, stateLabel: stateLabel,
     isSetpointEvent: isSetpointEvent, setpointEvents: setpointEvents, parseTimestamp: parseTimestamp,
-    snapshots: snapshots, setpointCSV: setpointCSV, snapshotCSV: snapshotCSV
+    snapshots: snapshots, detectOffsets: detectOffsets, setpointCSV: setpointCSV, snapshotCSV: snapshotCSV
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.HVAC = api;

@@ -64,6 +64,8 @@
   td{padding:6px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
   tbody tr:nth-child(even){background:var(--band)}
   td.num{text-align:right}
+  td.inferred{font-style:italic;color:var(--ink-3)}
+  .flags .err{margin-top:0}
   .st{font-weight:600}
   .st-Off{color:var(--s-off)} .st-Cooling{color:var(--s-cool)} .st-Heating{color:var(--s-heat)}
   .st-Emergency{color:var(--s-emer)} .st-Aux{color:var(--s-aux)}
@@ -105,7 +107,7 @@
   </div>
 
   <section class="panel" id="panel-set" role="tabpanel">
-    <p class="explain">Only the rows where a target temperature was set. A row stays if <code>tt</code> has a value, or if the unit is in heat-cool mode (<code>tm</code> = 4) and holds a heat or cool setpoint instead. Values pass through exactly as exported.</p>
+    <p class="explain">Only the rows where a target temperature was set. A row stays if <code>tt</code> has a value, or if the unit is in heat-cool mode and holds a heat or cool setpoint instead. Values pass through exactly as exported. The mode usually arrives as its own ping, so when a row doesn't carry one, it comes from a mode ping in the next 10 seconds, or else the last one reported.</p>
     <div class="stats" id="set-stats"></div>
     <div class="row"><button id="set-dl">Download setpoints CSV</button><span class="files" id="set-which"></span></div>
     <div class="tablewrap"><table id="set-table"></table></div>
@@ -133,7 +135,7 @@
     <li><b>cs</b>: current state, what the unit is actually doing. 0 off, 1 cooling, 2 heating, 3 emergency heat, 4 aux heat. Yes, 4 means something different here than in <code>tm</code>; that's the most common way these exports get misread.</li>
     <li><b>ct</b>: ambient temperature at the thermostat.</li>
   </ul>
-  <p>Quirks it handles: CRLF line endings (a stray <code>\r</code> makes the last column look filled on every row), <code>tm</code> written as <code>4.0</code>, setpoint rows with a blank mode (kept, mode left blank), duplicate rows where two monthly exports overlap, and columns in any order. Readings of exactly 32.0°F are usually a sensor dropout; they're counted and flagged but left in, because silently editing telemetry is worse than showing a glitch.</p>
+  <p>Quirks it handles: CRLF line endings (a stray <code>\r</code> makes the last column look filled on every row), <code>tm</code> written as <code>4.0</code>, setpoint rows that don't carry a mode (filled from the nearest mode ping and shown in italics), duplicate rows where two monthly exports overlap, exports of the same device taken in different time zones (flagged, since merging them doubles every event), and columns in any order. Readings of exactly 32.0°F are usually a sensor dropout; they're counted and flagged but left in, because silently editing telemetry is worse than showing a glitch.</p>
 </details>
 
 <footer>
@@ -195,10 +197,13 @@
       .map(function(k){ return k + ' ' + s.modes[k]; }).join(', ');
     $('set-stats').innerHTML = stat(fmt(s.kept + s.dropped), 'rows in the export') + stat(fmt(s.kept), 'setpoint events kept') +
       stat(fmt(s.dropped), 'telemetry pings dropped') + stat(s.kept ? ((s.kept / (s.kept + s.dropped)) * 100).toFixed(1) + '%' : '0%', 'of rows were signal');
-    $('set-which').textContent = (state.names.length > 1 ? 'From ' + state.names[0] + '. ' : '') + (modes ? 'Modes: ' + modes + '.' : '');
+    var inferred = s.modeSources.carried + s.modeSources.nearby;
+    $('set-which').textContent = (state.names.length > 1 ? 'From ' + state.names[0] + '. ' : '') + (modes ? 'Modes: ' + modes + '. ' : '') +
+      (inferred ? fmt(inferred) + ' of ' + fmt(s.kept) + ' rows didn’t report a mode, so it comes from the nearest mode ping (shown in italics).' : '');
     var head = '<thead><tr><th>timestamp</th><th>mode</th><th>tt</th><th>htt</th><th>ctt</th></tr></thead>';
     var body = s.rows.slice(0, PREVIEW).map(function(r){
-      return '<tr><td>' + esc(r.timestamp) + '</td><td>' + esc(r.mode) + '</td><td class="num">' + esc(r.tt) + '</td><td class="num">' + esc(r.htt) + '</td><td class="num">' + esc(r.ctt) + '</td></tr>';
+      var why = r.modeSource === 'carried' ? 'Last mode reported before this change' : r.modeSource === 'nearby' ? 'Mode reported within 10 seconds after this change' : '';
+      return '<tr><td>' + esc(r.timestamp) + '</td><td' + (why ? ' class="inferred" title="' + esc(why) + '"' : '') + '>' + esc(r.mode) + '</td><td class="num">' + esc(r.tt) + '</td><td class="num">' + esc(r.htt) + '</td><td class="num">' + esc(r.ctt) + '</td></tr>';
     }).join('');
     $('set-table').innerHTML = s.kept ? head + '<tbody>' + body + '</tbody>' : '<tbody><tr><td class="empty">No setpoint events in this file.</td></tr></tbody>';
     $('set-more').textContent = s.kept > PREVIEW ? 'Showing the first ' + PREVIEW + ' of ' + fmt(s.kept) + '. The download has all of them.' : '';
@@ -209,13 +214,19 @@
     var t = state.tl;
     $('tl-stats').innerHTML = stat(fmt(t.input), 'rows across ' + state.names.length + (state.names.length === 1 ? ' file' : ' files')) +
       stat(fmt(t.total), 'complete snapshots') + stat(fmt(t.duplicates), 'overlap duplicates removed') + stat(t.months.length, t.months.length === 1 ? 'month' : 'months');
-    var flags = [];
+    var flags = [], alarms = [];
+    t.offsets.forEach(function(o){
+      var ahead = o.hours > 0 ? state.names[o.b] : state.names[o.a], behind = o.hours > 0 ? state.names[o.a] : state.names[o.b];
+      alarms.push(ahead + ' reads ' + Math.abs(o.hours) + ' hour' + (Math.abs(o.hours) === 1 ? '' : 's') + ' ahead of ' + behind + ' for the same events (' + fmt(o.matched) + ' of ' + fmt(o.of) + ' timestamps line up after the shift). They were probably exported in different time zones, so this timeline records every event twice. Re-export one of them, or load them one at a time.');
+    });
     t.months.forEach(function(m){ if (m.partial) flags.push(m.label + ' has only ' + m.days + ' day' + (m.days === 1 ? '' : 's') + ' of data: the tail of an export that crossed a month edge. Keep it, or ignore that tab.'); });
     if (t.sensorDropouts) flags.push(t.sensorDropouts + ' ambient reading' + (t.sensorDropouts === 1 ? ' is' : 's are') + ' exactly 32.0°F, which usually means a sensor dropout. Left in as exported.');
     if (t.heatCoolRows) flags.push(t.heatCoolRows + ' row' + (t.heatCoolRows === 1 ? ' is' : 's are') + ' in heat-cool mode. This view carries the single target (tt) only; the Setpoint events tab shows the heat and cool targets.');
     if (t.leadingDropped) flags.push('The first ' + fmt(t.leadingDropped) + ' rows were skipped until temperature, state, and target had all reported once.');
     if (t.unparsed) flags.push(fmt(t.unparsed) + ' rows had a timestamp this tool couldn’t read and were skipped.');
-    $('tl-flags').innerHTML = flags.map(function(f){ return '<div class="flag">' + esc(f) + '</div>'; }).join('');
+    $('tl-flags').innerHTML = alarms.map(function(f){ return '<div class="err">' + esc(f) + '</div>'; }).join('') +
+      flags.map(function(f){ return '<div class="flag">' + esc(f) + '</div>'; }).join('');
+    $('tab-tl').textContent = alarms.length ? 'Monthly timeline (check time zones)' : 'Monthly timeline';
     $('tl-months').innerHTML = t.months.map(function(m, i){
       return '<button class="chip" data-i="' + i + '" aria-pressed="' + (i === state.month) + '">' + esc(m.label) + ' <small>' + fmt(m.rows.length) + '</small></button>';
     }).join('');
